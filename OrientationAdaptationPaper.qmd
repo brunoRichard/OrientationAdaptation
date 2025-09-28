@@ -1,0 +1,569 @@
+---
+title: "Adaptation to orientation in natural scenes"
+author:
+  - name: "Bruno Richard"
+    email: "br379@newark.rutgers.edu"
+    affiliations:
+      - ref: 1
+  - name: "Patrick Shafto"
+    affiliations:
+      - ref: 2
+
+affiliations:
+  - id: 1
+    name: "Department of Math and Computer Sciences, Rutgers University, Newark, New Jersey, USA"
+  - id: 2
+    name: "Department of Math and Computer Sciences, Rutgers University, Newark, New Jersey, USA"
+
+
+bibliography: references.bib
+csl: elsevier-harvard.csl
+
+format:
+  pdf:
+    keep-tex: true
+    # REMOVE the template-partials line
+    # template-partials:
+    #  - title.tex 
+    geometry:
+      - left=25mm
+      - right=25mm
+      - top=25mm
+      - bottom=25mm
+    fontsize: 12pt
+    tbl-cap-location: bottom
+    include-in-header:
+      text: |
+        \usepackage{indentfirst}
+        \setlength{\parindent}{15pt}
+        \setlength{\parskip}{10pt}
+        \usepackage[font=small]{caption}
+        \usepackage[noblocks]{authblk}
+        \renewcommand*{\Authsep}{, }
+        \renewcommand*{\Authand}{, }
+        \renewcommand*{\Authands}{, }
+        \renewcommand\Affilfont{\small}
+       
+abstract: >
+  The encoding mechanisms of the human visual system are associated with the distribution of features in natural environments (Olshausen & Field, 2000). Moreover, exposure to modified environments over an hour or so can generate meaningful changes in the visual sensitivity of observers, suggesting the importance of recent experience (Richard & Shafto, 2022, Schweinhart, Shafto, & Essock, 2017). This work measured sensitivity to the features of natural environments (e.g., orientation contrast and the slope of the amplitude spectrum) before and following the 60-minute adaptation period, which gives little indication of the time course of adaptation in modified environments. Here, we use the horizontal effect; an orientation anisotropy thought to be related to the distribution of orientation contrast in natural environments, to monitor the time course of adaptation in modified reality. We measured sensitivity to orientation with a matching task in nine observers. Observers wore a Head-Mounted Display (HMD) that presented an unaltered or an isotropic version of their environment, recorded from a head-mounted camera. Sensitivity to orientation was measured in the HMD with an orientation and contrast matching task. Before adaptation, observers exhibited the expected anisotropy; sensitivity to horizontally oriented stimuli was worse than vertical and oblique stimuli. During the first half of the adaptation period, sensitivity to horizontal stimuli improved, matching that of other orientations within 30 minutes of immersion in the isotropic environment. Sensitivity to different orientations was unaffected by the isotropic environment. Our findings demonstrate that adaptation to a novel, isotropic environment occurs gradually over a relatively brief time of approximately 30 minutes. Additionally, we bring further evidence that human sensitivity to oriented content is associated with the distribution of orientation contrast in the current environment of observers.
+---
+
+```{r, preliminaries, echo=FALSE,warning=FALSE, message=FALSE}
+library(R.matlab)
+library(plotrix)
+library(circular)
+library(pracma)
+library(matlab)
+
+colours <- c("#8E0D18", "#222222", "#00626D", "#007FAC", "#EBB600")
+coloursSoft <- c("#666666", "#52A2A9", "#7DBFD6", "#F5D36A")
+
+add.alpha <- function(col, alpha = .5){
+  apply(col2rgb(col)/255, 2, function(x) {
+        rgb(x[1], x[2], x[3], alpha)
+    })
+}
+coloursT <- add.alpha(colours)
+```
+
+# Introduction
+The encoding mechanisms of the human visual system are associated with the distribution of features in natural environments 
+
+(Olshausen & Field, 2000). Moreover, exposure to modified environments over an hour or so can generate meaningful changes in the visual sensitivity of observers, suggesting the importance of recent experience (Richard & Shafto, 2022, Schweinhart, Shafto, & Essock, 2017). This work measured sensitivity to the features of natural environments (e.g., orientation contrast and the slope of the amplitude spectrum) before and following the 60-minute adaptation period, which gives little indication of the time course of adaptation in modified environments. Here, we use the horizontal effect; an orientation anisotropy thought to be related to the distribution of orientation contrast in natural environments, to monitor the time course of adaptation in modified reality. We measured sensitivity to orientation with a matching task in nine observers. Observers wore a Head-Mounted Display (HMD) that presented an unaltered or an isotropic version of their environment, recorded from a head-mounted camera. Sensitivity to orientation was measured in the HMD with an orientation and contrast matching task. Before adaptation, observers exhibited the expected anisotropy; sensitivity to horizontally oriented stimuli was worse than vertical and oblique stimuli. During the first half of the adaptation period, sensitivity to horizontal stimuli improved, matching that of other orientations within 30 minutes of immersion in the isotropic environment. Sensitivity to different orientations was unaffected by the isotropic environment. Our findings demonstrate that adaptation to a novel, isotropic environment occurs gradually over a relatively brief time of approximately 30 minutes. Additionally, we bring further evidence that human sensitivity to oriented content is associated with the distribution of orientation contrast in the current environment of observers.
+
+```{r User Define Functions 1, echo=FALSE}
+# User defined functions
+# User defined functions to generate an ellipse error bar chart (the X/Y data) in addition to user functions to calcualte angular means, SD ... (get away from have to redefine the data to work with the R functions)
+
+ellipseErrorBar <- function(radialData, angleData, deviationRadial, deviationAngle){
+  out <- array(NA, dim = c(500,2,length(radialData)))
+  
+  for (i in 1:length(radialData)){
+    a <- deviationRadial[i]
+    b <- deviationAngle[i]
+    
+    thetaRange <- seq(0, pi, length.out = 250)
+    TT <- atan((a*tan(thetaRange))/b)
+    x1 = radialData[i] + (a * cos(TT))
+    x2 = radialData[i] - (a * cos(TT))
+    y = angleData[i] + (b * sin(TT))
+    
+    XXX = c(x1[1:(length(x1)/2)],rev(x2[1:(length(x2)/2)]))
+    Y = c(y[1:(length(y)/2)],
+          rev(y[1:(length(y)/2)]),
+          rev(y[(length(y)/2)+1:(length(y)/2)]),
+          y[(length(y)/2)+1:(length(y)/2)])
+    X = c(XXX,rev(XXX))
+    out[,1,i] <- X
+    out[,2,i] <- Y
+  } 
+  return(out)
+}
+
+angle <- function(H){
+  p <- atan2(Im(H), Re(H))
+  return(p)
+}
+
+angularDist <- function(X,Y){
+  r <- angle(exp(1i*X)/exp(1i*Y))
+  return(r)
+}
+
+ang2rad <- function(A){
+  r <- A * pi / 180
+  return(r)
+}
+
+meanAngle <- function(ang){
+  ang <- na.omit(ang)
+  r <- sum(exp(1i*ang))
+  mu <- angle(r)
+  return(mu)
+}
+
+sdAngle <- function(ang){
+  ang <- na.omit(ang)
+  r <- sum(exp(1i*ang))
+  r <- abs(r) / length(ang)
+  s0 = sqrt(-2*log(r))
+  return(s0)
+}
+```
+
+```{r User Defined Functions 2, echo=FALSE}
+# User defined functions to reorganize the individual participant data into a workable format. 
+# getAverageMatch calculates the angular distance (with a MOD of 180) between the observer response and the orientation of the stimulus 
+
+# getBaselineRivalry calculates the duration of perceptual dominance for each 60 second trial
+
+getAverageMatch <- function(baselineM){
+  baselineMatch <- matrix(, nrow = dim(baselineM$trials)[1], 6)
+  baselineMatch[,1:5] <- baselineM$trials
+  distance1 <- angularDist(ang2rad(baselineM$trials[,2]),ang2rad(baselineM$trials[,4]))
+  distance2 <- angularDist(ang2rad(baselineM$trials[,2]+180),ang2rad(baselineM$trials[,4]))
+  
+  distance <- NULL
+  for (i in 1:length(distance1)){
+    if (abs(distance1[i]) < abs(distance2[i])){
+      distance[i] <- distance1[i]
+    } else if (abs(distance1[i]) > abs(distance2[i])){
+      distance[i] <- distance2[i]
+    }
+  }
+  
+  baselineMatch[,6] <- distance
+  return(baselineMatch)
+}
+
+getBaselineRivalry <- function(baselineR){
+  pBaseline <- NULL
+  totalDuration <- NULL
+  sdpBaseline <- NULL
+  for (i in 1:8){
+    trialData <- baselineR$trialPercept[[i]]
+    trialData <- trialData[[1]][,1]
+    uniqueValues <- unique(trialData)
+    trialDataClean <- trialData[trialData == 115 | trialData == 114]
+    
+    curState <- trialDataClean[1]
+    n <- 0
+    eventTime <- NULL
+    for (ii in 1:(length(trialDataClean)-1)){
+      state <- trialDataClean[ii] 
+      if (state != curState){
+        n <- n+1
+        eventTime[n] <- ii *(60/length(trialData))
+      }
+      curState <- state
+    }
+    
+    duration <- NULL
+    if (!is.null(eventTime)){
+      duration[1] <- eventTime[1]
+      
+      if (length(eventTime) > 1){
+        for (D in 2:length(eventTime)){
+          duration[D] <- eventTime[D]-eventTime[(D-1)]
+        }
+      }
+      pBaseline[i] <- mean(duration)
+      sdpBaseline[i] <- sd(duration)
+    } else {
+      pBaseline[i] <- NA
+      sdpBaseline[i] <- NA
+    }
+  }
+  baselineRivalry <- cbind(pBaseline, sdpBaseline, baselineR$trialsR[,2])
+  return(baselineRivalry)
+}
+
+getDetailedRivalry <- function(baselineR){
+  pBaseline <- NULL
+  totalDuration <- NULL
+  sdpBaseline <- NULL
+  
+  for (i in 1:8){
+    trialData <- baselineR$trialPercept[[i]]
+    trialData <- trialData[[1]][,1]
+    uniqueValues <- unique(trialData)
+    trialDataClean <- trialData[trialData == 115 | trialData == 114]
+    
+    curState <- trialDataClean[1]
+    n <- 0
+    eventTime <- NULL
+    for (ii in 1:(length(trialDataClean)-1)){
+      state <- trialDataClean[ii] 
+      if (state != curState){
+        n <- n+1
+        eventTime[n] <- ii *(60/length(trialData))
+      }
+      curState <- state
+    }
+    
+    if (!is.null(eventTime)){
+      duration <- matrix(, nrow = length(eventTime), ncol = 3)
+      duration[1,2] <- trialDataClean[1]
+      duration[1,1] <- eventTime[1]
+      duration[1:length(eventTime),3] <- baselineR$trialsR[i,3]
+      
+      if (length(eventTime) > 1){
+        for (D in 2:length(eventTime)){
+          duration[D,1] <- eventTime[D]-eventTime[(D-1)]
+          if (duration[D-1,2] == 114){
+            duration[D,2] <- 115
+          } else {duration[D,2] <- 114}
+        }
+      }
+    }
+  }
+  totalDuration <- rbind(totalDuration, duration)
+  return(totalDuration)
+  
+}
+```
+
+```{r, Get Participant Data, echo=FALSE}
+participantDirectories <- list.dirs("~/Library/CloudStorage/Box-Box/OrientationContrastMatchingHMD/Results", recursive = FALSE)
+```
+
+# Methods
+
+# Results
+
+```{r, get baseline data, echo=FALSE}
+baselineMatchP <- NULL
+rivalryBaselineP <- NULL
+detailedDurationP <- NULL
+for (P in 1:length(participantDirectories)){
+  baselineM <- readMat(paste0(participantDirectories[P],"/Restultsbaseline.mat"))
+  baseMatch <- getAverageMatch(baselineM)
+  baselineMatchP <- rbind(baselineMatchP,cbind(rep(P, dim(baseMatch)[1]),baseMatch))
+  
+  baselineR <- readMat(paste0(participantDirectories[P],"/RestultsbaselineRivalry.mat"))
+  rivalryBaseline <- getBaselineRivalry(baselineR)
+  rivalryBaselineP <- rbind(rivalryBaselineP,rivalryBaseline)
+  
+  detailedDuration <- getDetailedRivalry(baselineR)
+  detailedDurationP <- rbind(detailedDurationP,detailedDuration)
+}
+
+baselineMatchP <- as.data.frame(baselineMatchP)
+colnames(baselineMatchP) <- c("Participant", "Trial", "RefOrientation", "RefContrast", "MatchOrientation", "MatchContrast", "OriDistance")
+
+baselineMatchP[baselineMatchP$MatchContrast == 0 | baselineMatchP$MatchContrast > 10, "MatchContrast"] <- NA
+baselineMatchP$contrastRatio <- log(baselineMatchP$MatchContrast/baselineMatchP$RefContrast)
+```
+
+```{r, getAverageBaseline, echo=FALSE}
+# Get participant averaged data
+meanOriMatch <- aggregate(OriDistance ~ RefOrientation + RefContrast, data = baselineMatchP , FUN = meanAngle)
+sdOriMatch <- aggregate(OriDistance ~ RefOrientation + RefContrast, data = baselineMatchP , FUN = sdAngle)
+meanContrastRatio <- aggregate(contrastRatio ~ RefOrientation + RefContrast, data = baselineMatchP , FUN = mean)
+sdContrastR <- aggregate(contrastRatio ~ RefOrientation + RefContrast, data = baselineMatchP , FUN = sd)
+
+# Merge averaged data frames into single DF
+OriDataTemp <- merge(meanOriMatch,sdOriMatch, by = c("RefContrast","RefOrientation"), all = TRUE, suffixes = c(".Mean", ".SD"))
+ContrastDataTemp <- merge(meanContrastRatio,sdContrastR, by = c("RefContrast","RefOrientation"), all = TRUE,suffixes = c(".Mean", ".SD"))
+averageBaselineData.Merged <- merge(OriDataTemp,ContrastDataTemp, by = c("RefContrast","RefOrientation"))
+```
+
+```{r, getduring data, echo=FALSE}
+duringPA <- NULL
+
+for (P in 1:length(participantDirectories)){
+  suppressWarnings(setwd(participantDirectories[P]))
+  files <- list.files(pattern = "Restultsduring")
+  duringP <- NULL
+  for (ii in 1:4){
+    duringM <- readMat(paste0(participantDirectories[P],"/",files[ii]))
+    duringMatch <- getAverageMatch(duringM)
+    duringMatch <- cbind(rep(ii, dim(duringMatch)[1]), duringMatch)
+    duringP <- rbind(duringP, duringMatch)
+  }
+  duringP <- cbind(rep(P, dim(duringP)[1]), duringP)
+  duringPA<-rbind(duringPA,duringP)
+}
+
+duringPA <- as.data.frame(duringPA)
+colnames(duringPA) <- c("Participant", "TimePoint", "Trial", "RefOrientation", "RefContrast", "MatchOrientation", "MatchContrast", "OriDistance")
+
+duringPA[duringPA$MatchContrast == 0 | duringPA$MatchContrast > 10, "MatchContrast"] <- NA
+duringPA$contrastRatio <- log(duringPA$MatchContrast/duringPA$RefContrast)
+```
+
+```{r, getduring data average, echo=FALSE }
+# Get participant average data
+meanOriMatch <- aggregate(OriDistance ~ RefOrientation + RefContrast + TimePoint, data = duringPA, FUN = meanAngle)
+sdOriMatch <- aggregate(OriDistance ~ RefOrientation + RefContrast + TimePoint, data = duringPA, FUN = sdAngle)
+meanContrastRatio <- aggregate(contrastRatio ~ RefOrientation + RefContrast + TimePoint, data = duringPA, FUN = mean)
+sdContrastRatio <- aggregate(contrastRatio ~ RefOrientation + RefContrast + TimePoint, data = duringPA, FUN = sd)
+
+# Merge participant average data into single DF
+OriDataTemp <- merge(meanOriMatch,sdOriMatch, by = c("RefContrast","RefOrientation", "TimePoint"), all = TRUE, suffixes = c(".Mean", ".SD"))
+ContrastDataTemp <- merge(meanContrastRatio,sdContrastRatio, by = c("RefContrast","RefOrientation","TimePoint"), all = TRUE,suffixes = c(".Mean", ".SD"))
+averageDuringData.Merged <- merge(OriDataTemp,ContrastDataTemp, by = c("RefContrast","RefOrientation","TimePoint"))
+```
+
+```{r, during participant times, echo=FALSE}
+duringTimes <- matrix(, nrow = 9, ncol = 4)
+duringTimes2 <- matrix(, nrow = 9, ncol = 4)
+
+duringTimes[1,] <- c(13*60+33, 13*60+48,14*60+1,14*60+13)
+duringTimes[2,] <- c(14*60+7, 14*60+26, 14*60+45,14*60+58)
+duringTimes[3,] <- c(11*60+41,11*60+54, 12*60+8, 12*60+22)
+duringTimes[4,] <- c(11*60+38, 11*60+57, 12*60+15, 12*60+33)
+duringTimes[5,] <- c(10*60+50, 11*60+2, 11*60+14, 11*60+27)
+duringTimes[6,] <- c(15*60+1, 15*60+17, 15*60+31, 15*60+45)
+duringTimes[7,] <- c(14*60+1, 14*60+18, 14*60+35, 14*60+51)
+duringTimes[8,] <- c(15*60+52, 16*60+7, 16*60+22, 16*60+37)
+duringTimes[9,] <- c(17*60+5, 17*60+21, 17*60+35, 17*60+50)
+
+duringTimes2[,1] <- 0
+duringTimes2[,2] <- duringTimes[,2]-duringTimes[,1]
+duringTimes2[,3] <- duringTimes2[,2]+duringTimes[,3]-duringTimes[,2]
+duringTimes2[,4] <- duringTimes2[,2]+duringTimes2[,3]+duringTimes[,4]-duringTimes[,3]
+```
+
+```{r, get post data, echo=FALSE}
+postMatchP <- NULL
+postRivalryP <- NULL
+detailedDurationPost <- NULL
+for (P in 1:length(participantDirectories)){
+  if (!substr(participantDirectories[P], nchar(participantDirectories[P])-1, nchar(participantDirectories[P])) == "AA"){
+    postM <- readMat(paste0(participantDirectories[P],"/Restultspost.mat"))
+    postMatch <- getAverageMatch(postM)
+    postMatchP <- rbind(postMatchP,cbind(rep(P, dim(postMatch)[1]),postMatch))
+    
+    postR <- readMat(paste0(participantDirectories[P],"/RestultspostRivalry.mat"))
+    rivalryPost <- getBaselineRivalry(postR)
+    postRivalryP <- rbind(postRivalryP,rivalryPost)
+    
+    detailedDuration <- getDetailedRivalry(postR)
+    detailedDurationPost <- rbind(detailedDurationPost,detailedDuration)
+  }
+}
+postMatchP <- as.data.frame(postMatchP)
+colnames(postMatchP) <- c("Participant",  "Trial", "RefOrientation", "RefContrast", "MatchOrientation", "MatchContrast", "OriDistance")
+
+postMatchP[postMatchP$MatchContrast == 0 | postMatchP$MatchContrast > 10, "MatchContrast"] <- NA
+postMatchP$contrastRatio <- log(postMatchP$MatchContrast/postMatchP$RefContrast)
+```
+
+```{r, get post data averages, echo=FALSE}
+# Get participant average data
+meanOriMatch <- aggregate(OriDistance ~ RefOrientation + RefContrast, data = postMatchP, FUN = meanAngle)
+sdOriMatch <- aggregate(OriDistance ~ RefOrientation + RefContrast, data = postMatchP, FUN = sdAngle)
+meanContrastRatio <- aggregate(contrastRatio ~ RefOrientation + RefContrast, data = postMatchP, FUN = mean)
+sdContrastRatio <- aggregate(contrastRatio ~ RefOrientation + RefContrast, data = postMatchP, FUN = sd)
+
+# Merge participant average data into single DF
+OriDataTemp <- merge(meanOriMatch,sdOriMatch, by = c("RefContrast","RefOrientation"), all = TRUE, suffixes = c(".Mean", ".SD"))
+ContrastDataTemp <- merge(meanContrastRatio,sdContrastRatio, by = c("RefContrast","RefOrientation"), all = TRUE,suffixes = c(".Mean", ".SD"))
+averagePostData.Merged <- merge(OriDataTemp,ContrastDataTemp, by = c("RefContrast","RefOrientation"))
+```
+
+```{r, save participant data, echo=FALSE}
+save <- 0
+yourdirectory <- "~/Library/CloudStorage/Box-Box/Manuscripts/Orientation Adaptation/Data/"
+if (save == 1){
+  save(baselineMatchP, duringPA, postMatchP, file = paste0(yourdirectory,"AllParticipantData.RData"))
+}
+```
+
+
+```{r, draw data radial, echo=FALSE}
+# averagePostData.Merged
+par(mfcol = c(2,2))
+yLimit <- c(-.5,1)
+
+colTemp <- c(1,2)
+
+for(ii in c(1.5,2)){
+ellipseErrorbarData <- ellipseErrorBar(averageBaselineData.Merged$contrastRatio.Mean[averageBaselineData.Merged$RefContrast==ii], 
+                            averageBaselineData.Merged$OriDistance.Mean[averageBaselineData.Merged$RefContrast==ii]+c(0,45,90,135)*pi/180, 
+                                       averageBaselineData.Merged$contrastRatio.SD[averageBaselineData.Merged$RefContrast==ii], 
+                                       averageBaselineData.Merged$OriDistance.SD[averageBaselineData.Merged$RefContrast==ii])
+
+radial.plot(rep(0, 100), seq(0, 2*pi, length.out = 100),
+            rp.type = "p",
+            label.pos = seq(0,315,45)*pi/180,
+            labels = c("0", "45", "90", "135", "180", "225","270", "315"),
+            start = 0,
+            line.col = "gray75",
+            lwd = 2,
+            radial.lim = yLimit)
+
+for (i in 1:4){
+  radial.plot(ellipseErrorbarData[,1,i], ellipseErrorbarData[,2,i],
+              rp.type = "p",
+              line.col = NA,
+              poly.col = coloursT[colTemp[round(ii-.5)]],
+              radial.lim = yLimit,
+              add = TRUE,
+              show.grid.labels = 0)
+}
+
+radial.plot(averageBaselineData.Merged$contrastRatio.Mean[averageBaselineData.Merged$RefContrast==ii], averageBaselineData.Merged$OriDistance.Mean[averageBaselineData.Merged$RefContrast==ii] + c(0,45,90,135)*pi/180, 
+            rp.type = "s", 
+            radial.lim = yLimit,
+            point.col = colours[colTemp[round(ii-.5)]], 
+            point.symbols = 19,
+            cex = 1.5,
+            show.grid.labels = 0, add = TRUE)
+}
+
+for(ii in c(1.5,2)){
+ellipseErrorbarData <- ellipseErrorBar(averagePostData.Merged$contrastRatio.Mean[averagePostData.Merged$RefContrast==ii], 
+                            averagePostData.Merged$OriDistance.Mean[averagePostData.Merged$RefContrast==ii]+c(0,45,90,135)*pi/180, 
+                                       averagePostData.Merged$contrastRatio.SD[averagePostData.Merged$RefContrast==ii], 
+                                       averagePostData.Merged$OriDistance.SD[averagePostData.Merged$RefContrast==ii])
+
+radial.plot(rep(0, 100), seq(0, 2*pi, length.out = 100),
+            rp.type = "p",
+            label.pos = seq(0,315,45)*pi/180,
+            labels = c("0", "45", "90", "135", "180", "225","270", "315"),
+            start = 0,
+            line.col = colours[2],
+            lwd = 2,
+            radial.lim = yLimit)
+
+for (i in 1:4){
+  radial.plot(ellipseErrorbarData[,1,i], ellipseErrorbarData[,2,i],
+              rp.type = "p",
+              line.col = NA,
+              poly.col = coloursT[colTemp[round(ii-.5)]],
+              radial.lim = yLimit,
+              add = TRUE,
+              show.grid.labels = 0)
+}
+
+radial.plot(averagePostData.Merged$contrastRatio.Mean[averagePostData.Merged$RefContrast==ii], averagePostData.Merged$OriDistance.Mean[averagePostData.Merged$RefContrast==ii] + c(0,45,90,135)*pi/180, 
+            rp.type = "s", 
+            radial.lim = yLimit,
+            point.col = colours[colTemp[round(ii-.5)]], 
+            point.symbols = 19,
+            cex = 1.5,
+            show.grid.labels = 0, add = TRUE)
+}
+```
+
+```{r, draw data boxplots, echo=FALSE}
+yLimit <- c(-1, 1.5)
+
+for (C in c(1.5,2)){
+  for (O in c(0,45,90,135)){
+    oriDataContrastBaseline <- baselineMatchP$contrastRatio[baselineMatchP$RefOrientation == O & baselineMatchP$RefContrast == C]
+    oriDataContrastDuring1 <- duringPA$contrastRatio[duringPA$RefOrientation == O & duringPA$RefContrast == C & duringPA$TimePoint == 1]
+    oriDataContrastDuring2 <- duringPA$contrastRatio[duringPA$RefOrientation == O & duringPA$RefContrast == C & duringPA$TimePoint == 2]
+    oriDataContrastDuring3 <- duringPA$contrastRatio[duringPA$RefOrientation == O & duringPA$RefContrast == C & duringPA$TimePoint == 3]
+    oriDataContrastDuring4 <- duringPA$contrastRatio[duringPA$RefOrientation == O & duringPA$RefContrast == C & duringPA$TimePoint == 4]
+    oriDataContrastPost <- postMatchP$contrastRatio[postMatchP$RefOrientation == O & postMatchP$RefContrast == C]
+    
+    ret <- boxplot(oriDataContrastBaseline, oriDataContrastDuring1, oriDataContrastDuring2, oriDataContrastDuring3, oriDataContrastDuring4, oriDataContrastPost, outline  = FALSE, border = NA, col = NA, lwd = 2, boxwex = .5, staplewex = .25, axes = FALSE, ann = FALSE, ylim = yLimit)
+    
+    abline(h = 0, col = "gray75", lwd = 2)
+    
+    ret <- boxplot(oriDataContrastBaseline, oriDataContrastDuring1, oriDataContrastDuring2, oriDataContrastDuring3, oriDataContrastDuring4, oriDataContrastPost, outline  = FALSE, border = colours[colTemp[round(C-.5)]], col = "white", lwd = 2, boxwex = .5, staplewex = .25, add = TRUE,axes = FALSE, ann = FALSE, ylim = yLimit)
+    
+    stripchart(oriDataContrastBaseline, add = TRUE, vertical = TRUE, at = 1, jitter = .4, pch = 19, method = "jitter", col = coloursT[colTemp[round(C-.5)]])
+    stripchart(oriDataContrastDuring1, add = TRUE, vertical = TRUE, at = 2, jitter = .4, pch = 19, method = "jitter", col = coloursT[colTemp[round(C-.5)]])
+    stripchart(oriDataContrastDuring2, add = TRUE, vertical = TRUE, at = 3, jitter = .4, pch = 19, method = "jitter", col = coloursT[colTemp[round(C-.5)]])
+    stripchart(oriDataContrastDuring3, add = TRUE, vertical = TRUE, at = 4, jitter = .4, pch = 19, method = "jitter", col = coloursT[colTemp[round(C-.5)]])
+    stripchart(oriDataContrastDuring4, add = TRUE, vertical = TRUE, at = 5, jitter = .4, pch = 19, method = "jitter", col = coloursT[colTemp[round(C-.5)]])
+    stripchart(oriDataContrastPost, add = TRUE, vertical = TRUE, at = 6, jitter = .4, pch = 19, method = "jitter", col = coloursT[colTemp[round(C-.5)]])
+    
+    axis(2, at = pretty(yLimit), tck = -.015, lwd = 2, labels = FALSE)
+    mtext(pretty(yLimit), 2, at = pretty(yLimit), line = .4, las = 1)
+    mtext("Contrast Match Ratio", 2, font = 2, line = 2)
+    mtext(c("Baseline", "During 1", "During 2", "During 3", "During 4", "Post\nAdaptation"), 1, line = .4, font = 2, padj = .5, at = 1:6)
+  }
+}
+```
+
+```{r, draw data distributions, echo=FALSE}
+xLimit <- c(-1.5, 1.5)
+yLimit <- c(0, 3.5)
+par(mfcol = c(1,4), mai = c(0.2, .1,.2,.1), omi = c(.25,.75,.25,.25))
+orientations <- c(0,45,90,135)
+contrasts <- c(1.5,2)
+orientationTitles <- c("Vertical", "Oblique (45)","Horizontal", "Oblique (135)" )
+BW <- .2
+betweenColours <- colorRampPalette(colours[1:2])(4)
+
+C <- 2
+times <- c(10, 25, 40, 55)
+
+
+for (O in 1:length(orientations)){
+  # for (C in 1:length(contrasts)){
+  plot(x = NULL, y = NULL,xlim = xLimit, ylim = yLimit, axes = FALSE, ann = FALSE)
+  axis(1, at = pretty(c(-1.5,1.5)), lwd = 2, tck =-.01, labels = FALSE)
+  if (O ==1){
+    mtext("Baseline",2, at = 2.5,font = 2,line=.35, adj = 1,las= 1)
+  }
+  if (C == 2) {
+    mtext(orientationTitles[O],3, font = 2)
+  }
+  if (C == 2){
+    mtext(pretty(c(-1.5,1.5)), 1, at = pretty(c(-1.5,1.5)), line = .45)
+    mtext("Match Ratio (ln)", 1, line = 2, font = 2)
+  }
+  lines(c(0,0), c(0,3.5), col = rgb(.5,.5,.5), lty = 2, lwd = 3)
+  
+  contrastRatio <- baselineMatchP[baselineMatchP$RefOrientation == orientations[O] & baselineMatchP$RefContrast == contrasts[C], "contrastRatio"]
+  out <- density(contrastRatio, 
+                 bw = BW,
+                 na.rm = TRUE)
+  out$y <- out$y / max(out$y)
+  polygon(out$x, out$y+2.5, col = coloursT[1],border = NA)
+  lines(out$x, out$y+2.5, col = colours[1], lwd = 3)
+  
+  IDX <- duringPA$RefOrientation == orientations[O]
+  IDXcontrast <- duringPA$RefContrast == contrasts[C]
+  theShift <- c(2,1.5,1,.5)
+  for (t in 1:4){
+    contrastRatio <- duringPA[duringPA$RefContrast == contrasts[C] & duringPA$TimePoint == t & duringPA$RefOrientation == orientations[O],"contrastRatio"]
+    out <- density(contrastRatio, bw = BW, na.rm = TRUE)
+    out$y <- out$y / max(out$y)
+    polygon(out$x, out$y+theShift[t], col = add.alpha(betweenColours[t]),border = NA)
+    lines(out$x, out$y+theShift[t], col = betweenColours[t], lwd = 3)
+    if (O== 1){mtext(paste0("T",t, "~", times[t],"m"), 2,font = 2, cex = 1, at = theShift[t], las =1, line=.35)}
+  }
+  
+  contrastRatio <- postMatchP[postMatchP$RefOrientation == orientations[O] & postMatchP$RefContrast == contrasts[C], "contrastRatio"]
+  out <- density(contrastRatio, bw = BW, na.rm = TRUE)
+  out$y <- out$y / max(out$y)
+  
+  polygon(out$x, out$y, col = coloursT[2], border = NA)
+  lines(out$x, out$y, col = colours[2], lwd = 3)
+  if (O == 1){mtext("Post", 2, at = 0, font = 2, cex = 1,line=.35, adj = 1, las= 1)}
+  # }
+}
+```
+
+# Modelling
+
+# Discussion
+
+# References
