@@ -8,10 +8,482 @@ date: "2025-09-28"
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
+```{r, preliminaries}
+library(R.matlab)
+library(plotrix)
+library(circular)
+library(pracma)
+library(matlab)
+
+colours <- c("#8E0D18", "#00626D", "#007FAC", "#EBB600", "#222222")
+coloursSoft <- c("#52A2A9", "#7DBFD6", "#F5D36A", "#666666")
+
+add.alpha <- function(col, alpha = .5){
+  apply(col2rgb(col)/255, 2, function(x) {
+    rgb(x[1], x[2], x[3], alpha)
+  })
+}
+coloursT <- add.alpha(colours)
+```
+
+```{r}
+angle <- function(H){
+  p <- atan2(Im(H), Re(H))
+  return(p)
+}
+
+angularDist <- function(X,Y){
+  r <- angle(exp(1i*X)/exp(1i*Y))
+  return(r)
+}
+
+ang2rad <- function(A){
+  r <- A * pi / 180
+  return(r)
+}
+
+meanAngle <- function(ang){
+  ang <- na.omit(ang)
+  r <- sum(exp(1i*ang))
+  mu <- angle(r)
+  return(mu)
+}
+
+sdAngle <- function(ang){
+  ang <- na.omit(ang)
+  r <- sum(exp(1i*ang))
+  r <- abs(r) / length(ang)
+  s0 = sqrt(-2*log(r))
+  return(s0)
+}
+
+get95CI <- function(data, lower){
+  N <- 1000
+  theMedian <- NULL
+  for (i in 1:N){
+    sampledData <- sample(data, size = length(data), replace = TRUE)
+    theMedian[i] <- median(sampledData, na.rm = TRUE)
+  }
+  if (lower){
+    theCI <- quantile(theMedian,0.025)
+  } else {
+    theCI <- quantile(theMedian,0.975)
+  }
+  return(theCI)
+}
+
+mkLogGaborFilters <- function(orientations = ori, spatialfrequency = sf, imageSize = imSize, stimSizeDeg = stimSizeDeg, OrientationBandwidth = 20, SpatialFrequencyBandwidth = 0.65, returnSFGabor = FALSE){
+  
+  # Define gabor matrices
+  SFGaborFFT <- array(NA, dim = c(imageSize,imageSize,length(spatialfrequency)))
+  ORIGaborFFT <- array(NA, dim = c(imageSize,imageSize,length(orientations),length(spatialfrequency)))
+  
+  # Make the Radius and Angle Maps
+  xrange <- seq(-imageSize/2,(imageSize/2-1), length.out = imageSize)
+  yrange <- seq(-imageSize/2,(imageSize/2-1), length.out = imageSize)
+  meshOut <- matlab::meshgrid(xrange,yrange)
+  Radius <- sqrt(meshOut$x**2+meshOut$y**2)
+  Radius.FFTShift <- circshift(Radius, c(matlab::fix(imageSize/2),matlab::fix(imageSize/2)))
+  Radius.FFTShift[1,1] <- 1
+  Radius.NoDC <- circshift(Radius.FFTShift, c(matlab::fix(imageSize/2),matlab::fix(imageSize/2)))
+  
+  thetaMap <- atan2(meshOut$x, meshOut$y)
+  sinThetaMap <- sin(thetaMap)
+  cosThetaMap <- cos(thetaMap)
+  
+  # Define filter tuning
+  logCF <- spatialfrequency
+  logCFcpi <- spatialfrequency * stimSizeDeg
+  sigmaonF <- SpatialFrequencyBandwidth
+  sigmaonO <- OrientationBandwidth * (pi/180)
+  CSFWeigghts <- CSFWeights()
+  
+  # Make the filters
+  for (S in 1:length(spatialfrequency)){
+    SFGabor <- normalizeBR(exp(-((log(Radius/logCFcpi[S])**2)/(2*log(sigmaonF)**2))))
+    SFGaborFFT[,,S] <- circshift(SFGabor, c(matlab::fix(imageSize/2),matlab::fix(imageSize/2)))
+    
+    for (O in 1:length(orientations)){
+      angl <- orientations[O] * (pi/180)
+      differenceSine1 <- sinThetaMap * cos(angl) - cosThetaMap * sin(angl)
+      differenceCosine1 <- cosThetaMap * cos(angl) + sinThetaMap * sin(angl)
+      differenceTheta1 <- abs(atan2(differenceSine1,differenceCosine1))
+      
+      differenceSine2 <- sinThetaMap * cos(angl+pi) - cosThetaMap * sin(angl+pi)
+      differenceCosine2 <- cosThetaMap * cos(angl+pi) + sinThetaMap * sin(angl+pi)
+      differenceTheta2 <- abs(atan2(differenceSine2,differenceCosine2))
+      
+      thetaGauss1 <- exp((-differenceTheta1**2) / (2*sigmaonO**2))
+      thetaGauss2 <- exp((-differenceTheta2**2) / (2*sigmaonO**2))
+      
+      OrientationFilter <- thetaGauss1 + thetaGauss2
+      OrientationFilter[1,1] <- 0
+      ORIGabor <- normalizeBR(OrientationFilter*SFGabor)
+      ORIGabor <- ORIGabor * CSFWeigghts[S]
+      ORIGaborFFT[,,O,S] <- circshift(ORIGabor, c(matlab::fix(imageSize/2),matlab::fix(imageSize/2)))
+    }
+  }
+  if (returnSFGabor){
+    return(SFGaborFFT)
+  } else {
+    return(ORIGaborFFT)
+  }
+}
+
+between <- function(query, low, high){
+  value <- (query >= low & query <= high)
+  return(value)
+}
+
+orientationFilterFunction <- function(centerOri = 0, width = 20, hiSF = hi, lowSF = low, imageSize = imageSize){
+  
+  H <- imageSize
+  W <- imageSize
+  meshOut <- matlab::meshgrid(seq(0,(W/2),1),seq(0,(H/2),1))
+  TMap <- atan2(meshOut$y,meshOut$x)
+  RMap <- sqrt(abs(meshOut$x)**2+abs(meshOut$y)**2)
+  TMap <- TMap * (180/pi)
+  
+  RMap <- cbind(RMap,fliplr(RMap[,2:(W/2)]))
+  RMap <- rbind(RMap,flipud(RMap[2:(H/2),]))
+  RMap <- circshift(RMap, c(W/2, H/2))
+  
+  TMap <- cbind(fliplr(t(TMap[2:((H/2)+1),]))+90, TMap)
+  TMap <- rbind(flipud(fliplr(TMap[2:((H/2)+1),]))+180, TMap)
+  TMap <- TMap[1:H, 1:W]
+  
+  # Filter Parameters
+  centerOri2 <- centerOri+180
+  cwb1 <- centerOri + width/2
+  ccwb1 <- centerOri - width/2
+  cwb2 <- centerOri2 + width/2
+  ccwb2 <- centerOri2 - width/2 
+  
+  if (ccwb1 < 0){
+    TMap <- t(fliplr(TMap))
+    centerOri <- centerOri+90         
+    centerOri2 <- centerOri2+90              
+    cwb1 <- cwb1+90              
+    ccwb1 <- ccwb1+90                  
+    cwb2 <- cwb2+90
+    ccwb2 <- ccwb2+90
+  }                   
+  
+  # Make triangle filter (bowtie)
+  sffilter <- between(RMap, lowSF, hiSF);
+  
+  anfilt1 <- (between(TMap, ccwb1, cwb1) & TMap <= centerOri)*((between(TMap, ccwb1, cwb1) & TMap <= centerOri)*TMap - centerOri + width/2)/(width/2)
+  anfilt2 <- (between(TMap, ccwb1, cwb1) & TMap > centerOri)*(-(between(TMap, ccwb1, cwb1) & TMap > centerOri)*TMap + centerOri + width/2)/(width/2)
+  anfilt3 <- (between(TMap, ccwb2, cwb2) & TMap <= centerOri2)*((between(TMap, ccwb2, cwb2) & TMap <= centerOri2)*TMap - centerOri2 + width/2)/(width/2)
+  anfilt4 <- (between(TMap, ccwb2, cwb2) & TMap > centerOri2)*(-(between(TMap, ccwb2, cwb2) & TMap > centerOri2)*TMap + centerOri2 + width/2)/(width/2)
+  angfilter <- anfilt1 + anfilt2 + anfilt3 + anfilt4
+  
+  oriFilter <- angfilter * sffilter
+  return(oriFilter)
+}
+
+makeSymmetric <- function(aMatrix){
+  matrixSize <- dim(aMatrix)
+  h <- matrixSize[1]
+  w <- matrixSize[2]
+  
+  SYMMTRC_RAND_PHASE <- matrix(NA, nrow = w, ncol = w)
+  
+  extrapixl <- (h+1)
+  midC <- h/2
+  after_midC1 <- ((h/2)+1)
+  after_midC2 <- ((h/2)+2)
+  
+  tmp_phse1 <- aMatrix
+  tmp_phse2 <- matrix(0,nrow = extrapixl, ncol = extrapixl)
+  tmp_phse2[1:h,1:w] <- tmp_phse1*-1
+  tmp_phse2[after_midC2:extrapixl,1:w] <- flipud(tmp_phse2[1:midC,1:w])
+  tmp_phse2[after_midC2:extrapixl,1:extrapixl] <- fliplr(tmp_phse2[after_midC2:extrapixl,1:extrapixl])
+  tmp_phse2[after_midC2:extrapixl,1:1] <- flipud(tmp_phse2[1:midC,1:1])
+  tmp_phse2[after_midC1:after_midC1,1:midC] <- fliplr(tmp_phse2[after_midC1:after_midC1,after_midC2:extrapixl])
+  tmp_phse2[1:midC,1:w] <- tmp_phse1[1:midC,1:w]
+  tmp_phse2[1:1,1:midC] <- fliplr(tmp_phse2[1:1,after_midC2:extrapixl])*-1
+  tmp_phse2[after_midC1:after_midC1,1:midC] <- fliplr(tmp_phse2[after_midC1:after_midC1,after_midC2:extrapixl])*-1
+  SYMMTRC_RAND_PHASE[1:w,1:w] <- tmp_phse2[1:h,1:w]
+  SYMMTRC_RAND_PHASE[1,after_midC1] <- 0
+  SYMMTRC_RAND_PHASE[after_midC1,after_midC1] <- 0
+  return(SYMMTRC_RAND_PHASE)
+}
+
+adjustRMSContrast <- function(im, desiredRMS = .15){
+  imageSize = dim(im)
+  r <- imageSize[1]
+  c <- imageSize[2]
+  
+  imNorm <- normalizeBR(im)
+  RMS <- sqrt((1/(r*c)) * sum(sum((imNorm - mean(imNorm))**2)))
+  scale <- desiredRMS / RMS
+  imageRMS <- imNorm * scale
+  return(imageRMS)
+}
+
+normalizeBR <- function(input){
+  A <- input - min(input)
+  out <- A / max(A)
+  return(out)
+}
+
+CSFWeights <- function(spatialFrequencies = c(0.5,1,2,4,8,16)){
+  sigma <- 1.18
+  fPeak <- 1
+  xDiv <- (log10(spatialFrequencies) - log10(fPeak))**2
+  denom <- 2*sigma**2
+  gaussWeights <- exp(-(xDiv/denom))
+  return(gaussWeights)
+}
+```
+
+
+
+
+
+
 ```{r, load data}
 yourdirectory <- "~/Library/CloudStorage/Box-Box/Manuscripts/Orientation Adaptation/Data/"
-
 load(paste0(yourdirectory, "AllParticipantData.RData"))
+```
 
+```{r}
+theIDX <- abs(baselineMatchP$contrastRatio) > 1.5
+nRemovedBaseline <- length(which(theIDX == TRUE))
+baselineMatchP[which(theIDX == TRUE), "contrastRatio"] <- NA
+
+theIDX <- abs(duringPA$contrastRatio) > 1.5
+nRemovedDuring <- length(which(theIDX == TRUE))
+duringPA[which(theIDX == TRUE), "contrastRatio"] <- NA
+
+theIDX <- abs(postMatchP$contrastRatio) > 1.5
+nRemovedPost <- length(which(theIDX == TRUE))
+postMatchP[which(theIDX == TRUE), "contrastRatio"] <- NA
+```
+
+
+```{r}
+hist(baselineMatchP$contrastRatio)
+hist(duringPA$contrastRatio)
+hist(postMatchP$contrastRatio)
+```
+
+
+Average data and create a single analysis file
+
+```{r}
+# Baseline
+meanOriMatch <- aggregate(OriDistance ~ RefOrientation + RefContrast, data = baselineMatchP , FUN = meanAngle)
+sdOriMatch <- aggregate(OriDistance ~ RefOrientation + RefContrast, data = baselineMatchP , FUN = sdAngle)
+meanContrastRatio <- aggregate(contrastRatio ~ RefOrientation + RefContrast, data = baselineMatchP , FUN = median, na.rm = TRUE)
+lowerContrastCI <- aggregate(contrastRatio ~ RefOrientation + RefContrast, data = baselineMatchP , FUN = get95CI, lower = TRUE)
+upperContrastCI <- aggregate(contrastRatio ~ RefOrientation + RefContrast, data = baselineMatchP , FUN = get95CI, lower = FALSE)
+
+## Merge averaged data frames into single DF
+OriDataTemp <- merge(meanOriMatch,sdOriMatch, by = c("RefContrast","RefOrientation"), all = TRUE, suffixes = c(".Mean", ".SD"))
+ciMerge <- merge(lowerContrastCI, upperContrastCI, by = c("RefContrast","RefOrientation"), all = TRUE, suffixes = c(".lCI", ".uCI"))
+ContrastDataTemp <- merge(meanContrastRatio,ciMerge, by = c("RefContrast","RefOrientation"), all = TRUE)
+averageBaselineData.Merged <- merge(OriDataTemp,ContrastDataTemp, by = c("RefContrast","RefOrientation"))
+colnames(averageBaselineData.Merged)[5] <- "contrastRatio.Median"
+```
+
+```{r}
+# During 
+meanOriMatch <- aggregate(OriDistance ~ RefOrientation + RefContrast + TimePoint, data = duringPA, FUN = meanAngle)
+sdOriMatch <- aggregate(OriDistance ~ RefOrientation + RefContrast + TimePoint, data = duringPA, FUN = sdAngle)
+meanContrastRatio <- aggregate(contrastRatio ~ RefOrientation + RefContrast + TimePoint, data = duringPA, FUN = median, na.rm = TRUE)
+lowerContrastCI <- aggregate(contrastRatio ~ RefOrientation + RefContrast + TimePoint, data = duringPA , FUN = get95CI, lower = TRUE)
+upperContrastCI <- aggregate(contrastRatio ~ RefOrientation + RefContrast + TimePoint, data = duringPA , FUN = get95CI, lower = FALSE)
+
+
+## Merge participant average data into single DF
+OriDataTemp <- merge(meanOriMatch,sdOriMatch, by = c("RefContrast","RefOrientation", "TimePoint"), all = TRUE, suffixes = c(".Mean", ".SD"))
+ciMerge <- merge(lowerContrastCI, upperContrastCI, by = c("RefContrast","RefOrientation", "TimePoint"), all = TRUE, suffixes = c(".lCI", ".uCI"))
+ContrastDataTemp <- merge(meanContrastRatio,ciMerge, by = c("RefContrast","RefOrientation","TimePoint"), all = TRUE)
+averageDuringData.Merged <- merge(OriDataTemp,ContrastDataTemp, by = c("RefContrast","RefOrientation","TimePoint"))
+colnames(averageDuringData.Merged)[6] <- "contrastRatio.Median"
+```
+
+```{r}
+# Post
+meanOriMatch <- aggregate(OriDistance ~ RefOrientation + RefContrast, data = postMatchP, FUN = meanAngle)
+sdOriMatch <- aggregate(OriDistance ~ RefOrientation + RefContrast, data = postMatchP, FUN = sdAngle)
+meanContrastRatio <- aggregate(contrastRatio ~ RefOrientation + RefContrast, data = postMatchP, FUN = median, na.rm = TRUE)
+lowerContrastCI <- aggregate(contrastRatio ~ RefOrientation + RefContrast, data = postMatchP , FUN = get95CI, lower = TRUE)
+upperContrastCI <- aggregate(contrastRatio ~ RefOrientation + RefContrast, data = postMatchP , FUN = get95CI, lower = FALSE)
+
+# Merge participant average data into single DF
+OriDataTemp <- merge(meanOriMatch,sdOriMatch, by = c("RefContrast","RefOrientation"), all = TRUE, suffixes = c(".Mean", ".SD"))
+ciMerge <- merge(lowerContrastCI, upperContrastCI, by = c("RefContrast","RefOrientation"), all = TRUE, suffixes = c(".lCI", ".uCI"))
+ContrastDataTemp <- merge(meanContrastRatio,ciMerge, by = c("RefContrast","RefOrientation"), all = TRUE)
+averagePostData.Merged <- merge(OriDataTemp,ContrastDataTemp, by = c("RefContrast","RefOrientation"))
+colnames(averagePostData.Merged)[5] <- "contrastRatio.Median"
+```
+
+```{r}
+analysisFile.Baseline <- data.frame(RefContrast = averageBaselineData.Merged$RefContrast, 
+                                    RefOrientation = averageBaselineData.Merged$RefOrientation,
+                                    TimePoint = rep(0, length(averageBaselineData.Merged$RefOrientation)), 
+                                    OriDistance.Mean = averageBaselineData.Merged$OriDistance.Mean,
+                                    OriDistance.SD = averageBaselineData.Merged$OriDistance.SD,
+                                    contrastRatio.Median = averageBaselineData.Merged$contrastRatio.Median,
+                                    contrastRatio.lCI = averageBaselineData.Merged$contrastRatio.lCI,
+                                    contrastRatio.uCI = averageBaselineData.Merged$contrastRatio.uCI)
+
+analysisFile.Post <- data.frame(RefContrast = averagePostData.Merged$RefContrast, 
+                                RefOrientation = averagePostData.Merged$RefOrientation,
+                                TimePoint = rep(5, length(averagePostData.Merged$RefOrientation)), 
+                                OriDistance.Mean = averagePostData.Merged$OriDistance.Mean,
+                                OriDistance.SD = averagePostData.Merged$OriDistance.SD,
+                                contrastRatio.Median = averagePostData.Merged$contrastRatio.Median,
+                                contrastRatio.lCI = averagePostData.Merged$contrastRatio.lCI,
+                                contrastRatio.uCI = averagePostData.Merged$contrastRatio.uCI)
+
+analysisFile <- rbind(analysisFile.Baseline, averageDuringData.Merged, analysisFile.Post)
+```
+
+```{r, fig.width=12}
+orientationTitles <- c("Vertical", "45 Oblique", "Horizontal", "135 Oblique")
+referenceContrasts <- unique(analysisFile$RefContrast)
+referenceOrientations <- sort(unique(analysisFile$RefOrientation))
+N <- length(unique(baselineMatchP$Participant))
+yLimit <- range(pretty(range(analysisFile$contrastRatio.lCI,analysisFile$contrastRatio.uCI)))
+
+par(mfcol = c(1,4), pty = "s", mai = c(.1,.1,.1,.1), omi = c(.2,.4,.1,0))
+for (O in 1:4){
+  plot(x = NULL, y = NULL, xlim = c(0,5), ylim = yLimit, axes = FALSE, ann = FALSE)
+  rect(.75,min(yLimit), 4.25, max(yLimit), col = rgb(.75,.75,.75,.5), border = FALSE)
+  if (O == 1){
+    mtext(seq(min(yLimit), max(yLimit), .2), 2, las = 1, line = .4, at = seq(min(yLimit), max(yLimit), .2))
+    mtext("Match Ratio", 2, font = 2, line = 2.5)
+    legend("bottomleft", legend = c("Low Contrast", "High Contrast"), lwd = 2, col = colours[1:2], pch = 19, box.lwd = 0, pt.cex = 1.5)
+  } 
+  axis(1, at = 0:5, lwd = 2, tck = -.015, labels = FALSE, pos= 0)
+  axis(2, at = seq(min(yLimit), max(yLimit), .2), tck = -.015, lwd = 2, labels = FALSE)
+  mtext(orientationTitles[O], 3, font = 2, adj = 0)
+  for (C in 1:2){
+    dataSubset <- subset(analysisFile, RefContrast == referenceContrasts[C] & RefOrientation == referenceOrientations[O])
+    analysisFile[analysisFile$TimePoint]
+    lines(dataSubset$TimePoint, dataSubset$contrastRatio.Median ,col = colours[C], lwd = 2)
+    arrows(dataSubset$TimePoint, dataSubset$contrastRatio.lCI,
+           dataSubset$TimePoint, dataSubset$contrastRatio.uCI, 
+           length = .025,angle = 90, code = 3, col = colours[C], lwd = 2)
+    points(dataSubset$TimePoint, dataSubset$contrastRatio.Median,col = colours[C], pch = 19, cex = 2)
+  }
+}
+```
+
+```{r}
+imageSize <- 256
+spatialfrequency <- c(0.5,1,2,4,8,16)
+orientations <- seq(0,165,15)
+stimSizeDeg <- 4
+
+gaborFilters <- mkLogGaborFilters(orientations = orientations, spatialfrequency = spatialfrequency, imageSize = imageSize, stimSizeDeg = stimSizeDeg)
+```
+
+```{r}
+
+mkStimuli <- function(imageSize = 256, filterOri = 0, width = 20, contrast = 2){
+  hi <- imageSize
+  lo <- 0
+  filter <- orientationFilterFunction(centerOri = filterOri, width = width, hiSF = hi, lowSF = lo, imageSize = imageSize)
+  filterFFTSHIFT <- circshift(filter, c(matlab::fix(imageSize/2),matlab::fix(imageSize/2)))
+  RMS = .2
+  
+  # GENERATE ISOTROPIC AMPLITUDE SPECTRUM - TEST
+  alpha <- 1
+  theGrid <- meshgrid(1:imageSize,1:imageSize)
+  theGrid$x <- theGrid$x - imageSize/2    
+  theGrid$y <- theGrid$y - imageSize/2    
+  noiseAmplitudeBlank <- sqrt(theGrid$x**2 + theGrid$y**2)/imageSize*sqrt(2)
+  noiseAmplitudeBlank <- fliplr(flipud(circshift(noiseAmplitudeBlank,c(matlab::fix(imageSize/2),matlab::fix(imageSize/2)))))
+  noiseAmplitudeBlank[1,1] <- 1
+  noiseAmplitude <- noiseAmplitudeBlank**(-alpha)
+  noiseAmplitude[1,1] <- 0
+  
+  randomMatrix <- (matrix(runif(imageSize*imageSize), nrow = imageSize, ncol = imageSize)*(pi*2))-pi
+  phaseMatrix <- makeSymmetric(randomMatrix)
+  phaseMatrix <- circshift(phaseMatrix, c(matlab::fix(imageSize/2),matlab::fix(imageSize/2)))
+  
+  filterRamp <- (filterFFTSHIFT * noiseAmplitude) * contrast
+  noiseStimulus <- Real(fft((filterRamp + noiseAmplitude) * exp(1i * phaseMatrix),inverse = TRUE))
+  
+  noiseStimulus = adjustRMSContrast(noiseStimulus, RMS); 
+  
+  return(filterRamp + noiseAmplitude)
+}
+
+
+verticalStim <- mkStimuli(filterOri = 90)
+oblique45Stim <- mkStimuli(filterOri = 45)
+horizontalStim <- mkStimuli(filterOri = 0)
+oblique135Stim <- mkStimuli(filterOri = 135)
+```
+
+```{r}
+filterResponseV <- matrix(NA, nrow = length(orientations), ncol = length(spatialfrequency))
+filterResponseO45 <- matrix(NA, nrow = length(orientations), ncol = length(spatialfrequency))
+filterResponseH <- matrix(NA, nrow = length(orientations), ncol = length(spatialfrequency))
+filterResponseO135 <- matrix(NA, nrow = length(orientations), ncol = length(spatialfrequency))
+
+for (S in 1:length(spatialfrequency)){
+  for (O in 1:length(orientations)){
+    filterResponseV[O,S] <- base::sum(verticalStim*gaborFilters[,,O,S])/(imageSize*imageSize)
+    filterResponseO45[O,S] <- base::sum(oblique45Stim*gaborFilters[,,O,S])/(imageSize*imageSize)
+    filterResponseH[O,S] <- base::sum(horizontalStim*gaborFilters[,,O,S])/(imageSize*imageSize)
+    filterResponseO135[O,S] <- base::sum(oblique135Stim*gaborFilters[,,O,S])/(imageSize*imageSize)
+  }
+}
+
+# image(rot90(circshift(verticalStim,c(matlab::fix(imageSize/2),matlab::fix(imageSize/2))),3))
+
+plot(filterResponseV[,1], type = "l")
+plot(filterResponseO45[,1], type = "l")
+plot(filterResponseH[,1], type = "l")
+plot(filterResponseO135[,1], type = "l")
+```
+
+Define filter responses
+
+```{r}
+p <- 2.4
+q <- 2
+m <- 4
+sigma <- 1.18
+wF <- 1/spatialfrequency
+wOv <- .5*exp((-(0 - orientations)**2)/((2*20*sigma)**2))
+wOo45 <- .4*exp((-(45 - orientations)**2)/((2*20*sigma)**2))
+wOh <- 2*exp((-(90 - orientations)**2)/((2*20*sigma)**2))
+wOo135 <- .4*exp((-(135 - orientations)**2)/((2*20*sigma)**2))
+
+respStageV <- matrix(NA, nrow = 12, ncol = 6)
+respStageO45 <- matrix(NA, nrow = 12, ncol = 6)
+respStageH <- matrix(NA, nrow = 12, ncol = 6)
+respStageO135 <- matrix(NA, nrow = 12, ncol = 6)
+
+for (O in 1:12){
+  for (S in 1:6){
+    respStageV[O,S] <- (abs(filterResponseV[O,S])**p)/(S+ abs(filterResponseV[O,S])**q + (wF[S]*wOv[O]*filterResponseV[O,S])**q)
+    respStageO45[O,S] <- (abs(filterResponseV[O,S])**p)/(S+ abs(filterResponseV[O,S])**q + (wF[S]*wOo45[O]*filterResponseV[O,S])**q)
+    respStageH[O,S] <- (abs(filterResponseV[O,S])**p)/(S+ abs(filterResponseV[O,S])**q + (wF[S]*wOh[O]*filterResponseV[O,S])**q)
+    respStageO135[O,S] <- (abs(filterResponseV[O,S])**p)/(S+ abs(filterResponseV[O,S])**q + (wF[S]*wOo135[O]*filterResponseV[O,S])**q)
+  }
+}
+
+finalRespFV <- apply(respStageV**m, 1, sum)**(1/m)
+finalRespV <- sum(finalRespFV**m)**(1/m)
+
+finalRespFO45 <- apply(respStageO45**m, 1, sum)**(1/m)
+finalRespO45 <- sum(finalRespFO45**m)**(1/m)
+
+finalRespFH <- apply(respStageH**m, 1, sum)**(1/m)
+finalRespH <- sum(finalRespFH**m)**(1/m)
+
+finalRespFO135 <- apply(respStageO135**m, 1, sum)**(1/m)
+finalRespO135 <- sum(finalRespFO135**m)**(1/m)
+
+plot(c(1,2,3,4),c(finalRespV, finalRespO45, finalRespH, finalRespO135))
 ```
 
